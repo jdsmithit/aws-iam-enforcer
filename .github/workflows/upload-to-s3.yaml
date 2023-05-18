@@ -1,0 +1,43 @@
+name: Create ECR
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: "eu-central-1"
+
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read  # This is required for actions/checkout
+
+jobs:
+  UploadLambda:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Setup terraform
+        uses: hashicorp/setup-terraform@v2
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          role-session-name: samplerolesession
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Terraform Init
+        id: init
+        run: terraform init
+      - name: Terraform Apply
+        id: apply
+        run: terraform apply -auto-approve
+      - name: Setup Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '>= 1.20.0'
+      - name: Upload to S3
+        working-directory: ./lambda
+        run: |
+          make
+          aws s3 cp iam-enforcer-lambda.zip s3://iam-Enforcer-artifacts/iam-enforcer-lambda.zip
