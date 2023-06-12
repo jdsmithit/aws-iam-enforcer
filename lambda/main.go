@@ -38,14 +38,7 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 }
 
 func disableKeys(days int) {
-	sess, err := session.NewSession()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	svc := iam.New(sess)
-
+	
 	usersOutput, err := svc.ListUsers(&iam.ListUsersInput{})
 	if err != nil {
 		fmt.Println(err)
@@ -75,6 +68,73 @@ func disableKeys(days int) {
 					continue
 				}
 				fmt.Printf("Disabled access key %s for user %s\n", *key.AccessKeyId, *user.UserName)
+			}
+		}
+	}
+}
+
+func DisableInactiveCredentials(days int) {
+	
+	sess, err := session.NewSession()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	svc := iam.New(sess)
+
+	input := &iam.ListUsersInput{}
+	result, err := svc.ListUsers(input)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Disable inactive credentials for each user
+	for _, user := range result.Users {
+		username := *user.UserName
+		fmt.Printf("Checking credentials for user: %s\n", username)
+
+		// Get user's access keys
+		keysInput := &iam.ListAccessKeysInput{
+			UserName: user.UserName,
+		}
+		keysResult, err := svc.ListAccessKeys(keysInput)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Disable inactive access keys
+		for _, key := range keysResult.AccessKeyMetadata {
+			accessKeyID := *key.AccessKeyId
+
+			// Get access key last used information
+			lastUsedInput := &iam.GetAccessKeyLastUsedInput{
+				AccessKeyId: key.AccessKeyId,
+			}
+			lastUsedResult, err := svc.GetAccessKeyLastUsed(lastUsedInput)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// Check if access key is inactive for more than 30 days
+			if lastUsedResult.AccessKeyLastUsed.LastUsedDate != nil {
+				lastUsedDate := *lastUsedResult.AccessKeyLastUsed.LastUsedDate
+				inactiveDays := time.Since(lastUsedDate).Hours() / 24
+
+				if inactiveDays > days {
+					// Disable the access key
+					disableInput := &iam.UpdateAccessKeyInput{
+						AccessKeyId:    aws.String(accessKeyID),
+						Status:         aws.String("Inactive"),
+						UserName:       user.UserName,
+					}
+					_, err = svc.UpdateAccessKey(disableInput)
+					if err != nil {
+						log.Fatal(err)
+					}
+
+					fmt.Printf("Disabled access key %s for user %s\n", accessKeyID, username)
+				}
 			}
 		}
 	}
