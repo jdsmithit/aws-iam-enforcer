@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -14,37 +15,41 @@ import (
 )
 
 const (
-	dryRunMode = "DRY_RUN_MODE"
-	
+	dryRunModeEnvVar = "DRY_RUN_MODE"
+
 	disableKeysToggleEnvVar = "DISABLE_KEYS_TOGGLE"
 	disableKeysDaysEnvVar   = "DISABLE_KEYS_DAYS"
 	defaultDisableKeysDays  = 30
 	disableKeysErrorMessage = "Disabling keys feature is not enabled"
-	
-	disableOnlyUnusedKeysToggleEnvVar = "DISABLE_KEYS_TOGGLE"
-	disableOnlyUnusedKeysDaysEnvVar   = "DISABLE_KEYS_DAYS"
-	defaultOnlyUnusedDisableKeysDays  = 30
+
+	disableOnlyUnusedKeysToggleEnvVar = "DISABLE_UNUSED_ONLY_KEYS_TOGGLE"
+	disableOnlyUnusedKeysDaysEnvVar   = "DISABLE_UNUSED_ONLY_KEYS_DAYS"
+	defaultOnlyUnusedKeysDays         = 30
 	disableOnlyUnusedKeysErrorMessage = "Disabling only unused keys feature is not enabled"
 )
 
 // For local testing
-//func main() {
-//	disableKeys(20)
-//}
+func main() {
+	disableAllKeys(20, true)
+	disableInactiveKeys(40, false)
+}
 
 func handler(ctx context.Context, event events.CloudWatchEvent) error {
-	disableeOnlyUnusedKeysToggle := EnvVarAsBool(disableeOnlyUnusedKeysToggleEnvVar)
+	dryRunMode := EnvVarAsBool(dryRunModeEnvVar)
+	fmt.Printf("Dry runmode =  %t\n", dryRunMode)
+
+	disableeOnlyUnusedKeysToggle := EnvVarAsBool(disableOnlyUnusedKeysToggleEnvVar)
 	if disableeOnlyUnusedKeysToggle {
-		disableeOnlyUnusedKeysDays := getEnvVarAsInt(disableeOnlyUnusedKeysDaysEnvVar, defaultDisableeOnlyUnusedKeysDays)
-		disableeOnlyUnusedKeys(disableeOnlyUnusedKeysDays)
+		disableeOnlyUnusedKeysDays := getEnvVarAsInt(disableOnlyUnusedKeysDaysEnvVar, defaultOnlyUnusedKeysDays)
+		disableInactiveKeys(disableeOnlyUnusedKeysDays, dryRunMode)
 	} else {
-		fmt.Println(disableeOnlyUnusedKeysErrorMessage)
+		fmt.Println(disableOnlyUnusedKeysErrorMessage)
 	}
-	
+
 	disableKeysToggle := EnvVarAsBool(disableKeysToggleEnvVar)
 	if disableKeysToggle {
 		disableKeysDays := getEnvVarAsInt(disableKeysDaysEnvVar, defaultDisableKeysDays)
-		disableAllKeys(disableKeysDays)
+		disableAllKeys(disableKeysDays, dryRunMode)
 	} else {
 		fmt.Println(disableKeysErrorMessage)
 	}
@@ -52,10 +57,15 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 	return nil
 }
 
-func disableAllKeys(days int) {
-	fmt.Printf("Dry runmode =  %s\n", dryRunMode)
-	
+func disableAllKeys(keyAgeInDays int, dryRunMode bool) {
+	svc, shouldReturn := CreateNewIamClientSession()
+
+	if shouldReturn {
+		return
+	}
+
 	usersOutput, err := svc.ListUsers(&iam.ListUsersInput{})
+
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -63,73 +73,35 @@ func disableAllKeys(days int) {
 
 	currentTime := time.Now()
 	for _, user := range usersOutput.Users {
-		accessKeysOutput, err := svc.ListAccessKeys(&iam.ListAccessKeysInput{
-			UserName: user.UserName,
-		})
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+		accessKeysOutput := getAccessKeysForUser(user, svc)
 
 		for _, key := range accessKeysOutput.AccessKeyMetadata {
-			if key.CreateDate.AddDate(0, 0, days).Before(currentTime) {
-				disableKeyInput := &iam.UpdateAccessKeyInput{
-					AccessKeyId: key.AccessKeyId,
-					Status:      aws.String("Inactive"),
-					UserName:    user.UserName,
-				}
-				
-				if dryRunMode != true {
-					_, err := svc.UpdateAccessKey(disableKeyInput)
-					if err != nil {
-						fmt.Println(err)
-						continue
-					}
-				}
-				
-				fmt.Printf("Disabled access key %s for user %s\n", *key.AccessKeyId, *user.UserName)
+			if key.CreateDate.AddDate(0, 0, keyAgeInDays).Before(currentTime) {
+				markKeysAsDisabled(key, user, dryRunMode, svc)
 			}
 		}
 	}
 }
 
-func disableInactiveCredentials(days int) {
-	
-	fmt.Printf("Dry runmode =  %s\n", dryRunMode)
-	
-	sess, err := session.NewSession()
+func disableInactiveKeys(keyInactivityPeriodInDays int, dryRunMode bool) {
+	svc, shouldReturn := CreateNewIamClientSession()
+
+	if shouldReturn {
+		return
+	}
+
+	usersOutput, err := svc.ListUsers(&iam.ListUsersInput{})
+
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	svc := iam.New(sess)
+	for _, user := range usersOutput.Users {
+		accessKeysOutput := getAccessKeysForUser(user, svc)
 
-	input := &iam.ListUsersInput{}
-	result, err := svc.ListUsers(input)
-	if err != nil {
-		log.Fatal(err)
-	}
+		for _, key := range accessKeysOutput.AccessKeyMetadata {
 
-	// Disable inactive credentials for each user
-	for _, user := range result.Users {
-		username := *user.UserName
-		fmt.Printf("Checking credentials for user: %s\n", username)
-
-		// Get user's access keys
-		keysInput := &iam.ListAccessKeysInput{
-			UserName: user.UserName,
-		}
-		keysResult, err := svc.ListAccessKeys(keysInput)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// Disable inactive access keys
-		for _, key := range keysResult.AccessKeyMetadata {
-			accessKeyID := *key.AccessKeyId
-
-			// Get access key last used information
 			lastUsedInput := &iam.GetAccessKeyLastUsedInput{
 				AccessKeyId: key.AccessKeyId,
 			}
@@ -138,30 +110,59 @@ func disableInactiveCredentials(days int) {
 				log.Fatal(err)
 			}
 
-			// Check if access key is inactive for more than 30 days
 			if lastUsedResult.AccessKeyLastUsed.LastUsedDate != nil {
 				lastUsedDate := *lastUsedResult.AccessKeyLastUsed.LastUsedDate
 				inactiveDays := time.Since(lastUsedDate).Hours() / 24
 
-				if inactiveDays > days {
-					// Disable the access key
-					disableInput := &iam.UpdateAccessKeyInput{
-						AccessKeyId:    aws.String(accessKeyID),
-						Status:         aws.String("Inactive"),
-						UserName:       user.UserName,
-					}
-					
-					if dryRunMode != true {
-						_, err := svc.UpdateAccessKey(disableKeyInput)
-						if err != nil {
-							log.Fatal(err)
-						}
-					}
-					fmt.Printf("Disabled access key %s for user %s\n", accessKeyID, username)
+				if inactiveDays > float64(keyInactivityPeriodInDays) {
+					markKeysAsDisabled(key, user, dryRunMode, svc)
 				}
 			}
 		}
 	}
+}
+
+func CreateNewIamClientSession() (*iam.IAM, bool) {
+	sess, err := session.NewSession()
+	if err != nil {
+		fmt.Println(err)
+		return nil, true
+	}
+
+	svc := iam.New(sess)
+
+	return svc, false
+}
+
+func getAccessKeysForUser(user *iam.User, svc *iam.IAM) *iam.ListAccessKeysOutput {
+	username := *user.UserName
+	fmt.Printf("Checking credentials for user: %s\n", username)
+
+	keysInput := &iam.ListAccessKeysInput{
+		UserName: user.UserName,
+	}
+	accessKeysOutput, err := svc.ListAccessKeys(keysInput)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return accessKeysOutput
+}
+
+func markKeysAsDisabled(key *iam.AccessKeyMetadata, user *iam.User, dryRunMode bool, svc *iam.IAM) {
+	disableKeyInput := &iam.UpdateAccessKeyInput{
+		AccessKeyId: key.AccessKeyId,
+		Status:      aws.String("Inactive"),
+		UserName:    user.UserName,
+	}
+
+	if dryRunMode != true {
+		_, err := svc.UpdateAccessKey(disableKeyInput)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	fmt.Printf("Disabled access key %s for user %s\n", *key.AccessKeyId, *user.UserName)
 }
 
 func EnvVarAsBool(key string) bool {

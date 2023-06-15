@@ -1,6 +1,8 @@
 FROM alpine as build
+RUN useradd -u 1 lambda
+USER lambda
 # install build tools
-RUN apk add go git
+RUN apk add --no-cache go git
 RUN go env -w GOPROXY=direct
 # cache dependencies
 ADD go.mod go.sum ./
